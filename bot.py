@@ -94,5 +94,12 @@ for coin in coins:
         print(f"❌ Error scanning {coin}. It may be temporarily unavailable.")
 
 print("\n--- 10-COIN SCAN COMPLETE ---")
+print("--- 🤖 GEMINI AI 10-COIN SCANNER ---")
 
+# --- ADD THIS TEMPORARY LINE FOR TESTING ---
+send_alert("🚨 TEST ALERT: Your cloud trading bot is live and scanning markets!")
+# -------------------------------------------
+
+for coin in coins:
+    # (rest of your code...)
             
