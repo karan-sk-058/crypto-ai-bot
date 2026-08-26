@@ -80,9 +80,8 @@ for coin in coins:
                 f"Take Profit (2%): ${take_profit:.2f}\n\n"
                 f"🤖 AI Reasoning:\n{ai_response.text}"
             )
-            print("--- 🤖 GEMINI AI 10-COIN SCANNER ---")
-
-send_alert(alert_message)
+            
+            send_alert(alert_message)
             print("✅ Alert sent directly to your phone!")
             
         elif close_price < ema and rsi > 70:
