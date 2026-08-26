@@ -88,16 +88,4 @@ send_alert("🚨 TEST ALERT: Your cloud trading bot is live and scanning markets
 
 for coin in coins:
     # (rest of your code...)
-            send_alert(alert_message)
-            print("✅ Alert sent directly to your phone!")
             
-        elif close_price < ema and rsi > 70:
-            print("⚪ SELL SIGNAL DETECTED! (Skipping alerts as we focus on buy setups)")
-            
-        else:
-            print("⚪ NO TRADE. Metrics are neutral.")
-            
-    except Exception as e:
-        print(f"❌ Error scanning {coin}. It may be temporarily unavailable.")
-
-print("\n--- 10-COIN SCAN COMPLETE ---")
