@@ -80,7 +80,14 @@ for coin in coins:
                 f"Take Profit (2%): ${take_profit:.2f}\n\n"
                 f"🤖 AI Reasoning:\n{ai_response.text}"
             )
-            
+            print("--- 🤖 GEMINI AI 10-COIN SCANNER ---")
+
+# --- ADD THIS TEMPORARY LINE FOR TESTING ---
+send_alert("🚨 TEST ALERT: Your cloud trading bot is live and scanning markets!")
+# -------------------------------------------
+
+for coin in coins:
+    # (rest of your code...)
             send_alert(alert_message)
             print("✅ Alert sent directly to your phone!")
             
