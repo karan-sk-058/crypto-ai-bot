@@ -10,98 +10,99 @@ AI_API_KEY = os.environ.get("AI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ~50 coins: majors + alts + popular meme coins (Binance.US pairs)
-# Missing pairs are skipped automatically
-COINS = [
-    # Majors
+# YOUR CURRENT HOLDINGS (update when you trade)
+# Used so the bot prioritizes advice for coins you already own
+PORTFOLIO = {
+    "BTCUSDT": 0.00002404,
+    "DOGEUSDT": 10.7122,
+    # Meme coins (may not be on all exchanges – bot will skip if no data)
+    "CHILLGUYUSDT": 10.8236,
+    "MOGUSDT": 527837.4,
+}
+
+# Liquid coins to consider rotating INTO (small capital = prefer liquid pairs)
+SCAN_COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
-    "LTCUSDT", "ATOMUSDT", "NEARUSDT", "UNIUSDT", "APTUSDT",
-    "ARBUSDT", "OPUSDT", "SUIUSDT", "SEIUSDT", "TIAUSDT",
-    # More alts
-    "FILUSDT", "ICPUSDT", "HBARUSDT", "VETUSDT", "ALGOUSDT",
-    "AAVEUSDT", "MKRUSDT", "GRTUSDT", "SANDUSDT", "MANAUSDT",
-    "AXSUSDT", "FTMUSDT", "EGLDUSDT", "XTZUSDT", "EOSUSDT",
-    "XLMUSDT", "TRXUSDT", "BCHUSDT", "ETCUSDT", "COMPUSDT",
-    # Meme / high volatility
-    "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT", "BONKUSDT", "WIFUSDT",
-    "MEMEUSDT", "BABYDOGEUSDT", "1000SATSUSDT", "ORDIUSDT", "RATSUSDT",
+    "LTCUSDT", "NEARUSDT", "SUIUSDT", "ARBUSDT", "OPUSDT",
+    "SHIBUSDT", "PEPEUSDT", "WIFUSDT", "BONKUSDT", "FLOKIUSDT",
 ]
 
-# Risk settings (suggestions only)
-STOP_LOSS_PCT = 0.02      # 2%
-TAKE_PROFIT_PCT = 0.04    # 4%
+# Merge portfolio symbols into scan list
+for sym in PORTFOLIO:
+    if sym not in SCAN_COINS:
+        SCAN_COINS.insert(0, sym)
 
-# Strategy settings
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
 RSI_BUY_MAX = 38
 RSI_SELL_MIN = 62
 EMA_FAST = 9
 EMA_SLOW = 21
 VOLUME_LOOKBACK = 20
+CANDLE_INTERVAL = "15m"  # more responsive than 1h for frequent checks
 
-BACKTEST_MODE = False
-BACKTEST_LIMIT = 200
+# Only spam Telegram when there is a real recommendation
+ALWAYS_SEND_SUMMARY = False
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
-# ====================== CLIENTS ======================
-if not AI_API_KEY and not BACKTEST_MODE:
+if not AI_API_KEY:
     logger.error("AI_API_KEY is missing")
     raise SystemExit("Missing AI_API_KEY")
 
-client = genai.Client(api_key=AI_API_KEY) if AI_API_KEY else None
+client = genai.Client(api_key=AI_API_KEY)
 
-# ====================== HELPERS ======================
+
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("Telegram credentials missing – alert not sent")
+        logger.warning("Telegram credentials missing")
         return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if len(message) > 4000:
+        message = message[:3990] + "\n...(truncated)"
     try:
-        # Telegram has a 4096 char limit – split if needed
-        if len(message) > 4000:
-            message = message[:3990] + "\n...(truncated)"
         resp = requests.post(
-            url,
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": message,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": True
+                "disable_web_page_preview": True,
             },
-            timeout=12
+            timeout=12,
         )
         resp.raise_for_status()
         return True
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+        logger.error(f"Telegram failed: {e}")
         return False
 
 
-def get_klines(symbol: str, interval: str = "1h", limit: int = 100) -> pd.DataFrame | None:
-    url = f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+def get_klines(symbol: str, interval: str = CANDLE_INTERVAL, limit: int = 100):
+    # Public market data (signals). CoinSwitch execution stays manual on the app.
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            # fallback Binance.US
+            r = requests.get(
+                f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+                timeout=10,
+            )
+        if r.status_code != 200:
             return None
-        data = response.json()
+        data = r.json()
         if not data or isinstance(data, dict):
             return None
-
-        df = pd.DataFrame(data)
-        df = df[[0, 1, 2, 3, 4, 5]]
+        df = pd.DataFrame(data)[[0, 1, 2, 3, 4, 5]]
         df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
-        df["close"] = df["close"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["volume"] = df["volume"].astype(float)
+        for c in ["close", "high", "low", "volume"]:
+            df[c] = df[c].astype(float)
         return df
     except Exception:
         return None
@@ -111,7 +112,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
-
     delta = df["close"].diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
@@ -119,182 +119,165 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     avg_loss = loss.ewm(com=13, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-10)
     df["rsi"] = 100 - (100 / (1 + rs))
-
     df["vol_avg"] = df["volume"].rolling(VOLUME_LOOKBACK).mean()
     return df
 
 
-def get_ai_reasoning(symbol: str, side: str, price: float, ema_fast: float, ema_slow: float, rsi: float) -> str:
-    if client is None:
-        return "AI disabled."
-
-    prompt = (
-        f"Act as a quantitative crypto trader. "
-        f"{symbol} shows a {side} recommendation on the 1-hour chart. "
-        f"Price: ${price:.6f}, EMA{EMA_FAST}: ${ema_fast:.6f}, EMA{EMA_SLOW}: ${ema_slow:.6f}, RSI: {rsi:.1f}. "
-        f"Give a concise 2-sentence reasoning. Be realistic and mention key risks."
-    )
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.7-flash",
-            contents=prompt
-        )
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"AI reasoning failed for {symbol}: {e}")
-        return "AI reasoning unavailable."
-
-
-def check_signals(df: pd.DataFrame) -> str | None:
+def check_signals(df: pd.DataFrame):
     if len(df) < max(EMA_SLOW, VOLUME_LOOKBACK) + 5:
         return None
-
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    ema_fast = latest["ema_fast"]
-    ema_slow = latest["ema_slow"]
-    rsi = latest["rsi"]
-    vol = latest["volume"]
-    vol_avg = latest["vol_avg"]
-
-    volume_ok = vol > (vol_avg * 0.75) if pd.notna(vol_avg) else True
+    latest, prev = df.iloc[-1], df.iloc[-2]
+    ema_fast, ema_slow, rsi = latest["ema_fast"], latest["ema_slow"], latest["rsi"]
+    vol, vol_avg = latest["volume"], latest["vol_avg"]
+    volume_ok = vol > (vol_avg * 0.7) if pd.notna(vol_avg) else True
 
     bullish_cross = prev["ema_fast"] <= prev["ema_slow"] and ema_fast > ema_slow
-    buy_condition = (
-        (ema_fast > ema_slow and rsi < RSI_BUY_MAX and volume_ok) or
-        (bullish_cross and rsi < 48 and volume_ok)
-    )
-
     bearish_cross = prev["ema_fast"] >= prev["ema_slow"] and ema_fast < ema_slow
-    sell_condition = (
-        (ema_fast < ema_slow and rsi > RSI_SELL_MIN and volume_ok) or
-        (bearish_cross and rsi > 52 and volume_ok)
-    )
 
-    if buy_condition:
+    if (ema_fast > ema_slow and rsi < RSI_BUY_MAX and volume_ok) or (
+        bullish_cross and rsi < 48 and volume_ok
+    ):
         return "BUY"
-    if sell_condition:
+    if (ema_fast < ema_slow and rsi > RSI_SELL_MIN and volume_ok) or (
+        bearish_cross and rsi > 52 and volume_ok
+    ):
         return "SELL"
     return None
 
 
-def scan_coin(symbol: str, recommendations: list):
-    """Scan one coin and collect buy/sell recommendations."""
-    logger.info(f"Scanning {symbol}...")
+def ai_note(symbol, side, price, ema_fast, ema_slow, rsi):
+    prompt = (
+        f"Act as a cautious crypto advisor for a trader with VERY SMALL capital. "
+        f"{symbol} has a {side} signal on 15m. Price ${price:.6f}, "
+        f"EMA9 ${ema_fast:.6f}, EMA21 ${ema_slow:.6f}, RSI {rsi:.1f}. "
+        f"Give 2 short sentences. Mention fees risk for small size."
+    )
+    try:
+        return client.models.generate_content(
+            model="gemini-3.7-flash", contents=prompt
+        ).text.strip()
+    except Exception as e:
+        logger.error(f"AI failed: {e}")
+        return "AI note unavailable."
 
-    df = get_klines(symbol, limit=100)
+
+def scan_symbol(symbol: str):
+    df = get_klines(symbol)
     if df is None or len(df) < 40:
-        logger.info(f"{symbol} → skipped (no data / not listed)")
-        return
-
+        return None
     df = calculate_indicators(df)
     latest = df.iloc[-1]
-
-    price = latest["close"]
-    ema_fast = latest["ema_fast"]
-    ema_slow = latest["ema_slow"]
-    rsi = latest["rsi"]
-
     signal = check_signals(df)
-
-    if signal is None:
-        logger.info(f"{symbol} → no clear setup (RSI {rsi:.1f})")
-        return
-
-    stop_loss = price * (1 - STOP_LOSS_PCT) if signal == "BUY" else price * (1 + STOP_LOSS_PCT)
-    take_profit = price * (1 + TAKE_PROFIT_PCT) if signal == "BUY" else price * (1 - TAKE_PROFIT_PCT)
-
-    reasoning = get_ai_reasoning(symbol, signal, price, ema_fast, ema_slow, rsi)
-
-    rec = {
+    if not signal:
+        return {
+            "symbol": symbol,
+            "side": None,
+            "price": float(latest["close"]),
+            "rsi": float(latest["rsi"]),
+            "in_portfolio": symbol in PORTFOLIO,
+        }
+    price = float(latest["close"])
+    ema_fast = float(latest["ema_fast"])
+    ema_slow = float(latest["ema_slow"])
+    rsi = float(latest["rsi"])
+    return {
         "symbol": symbol,
         "side": signal,
         "price": price,
         "rsi": rsi,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "reasoning": reasoning,
+        "stop": price * (1 - STOP_LOSS_PCT) if signal == "BUY" else price * (1 + STOP_LOSS_PCT),
+        "target": price * (1 + TAKE_PROFIT_PCT) if signal == "BUY" else price * (1 - TAKE_PROFIT_PCT),
+        "reasoning": ai_note(symbol, signal, price, ema_fast, ema_slow, rsi),
+        "in_portfolio": symbol in PORTFOLIO,
+        "qty": PORTFOLIO.get(symbol),
     }
-    recommendations.append(rec)
-
-    # Individual alert
-    emoji = "🟢" if signal == "BUY" else "🔴"
-    action = "BUY" if signal == "BUY" else "SELL"
-
-    message = (
-        f"{emoji} <b>RECOMMENDATION: {action} {symbol}</b>\n\n"
-        f"Current Price: <b>${price:.6f}</b>\n"
-        f"Suggested Stop: ${stop_loss:.6f}\n"
-        f"Suggested Target: ${take_profit:.6f}\n"
-        f"RSI: {rsi:.1f} | EMA{EMA_FAST}/{EMA_SLOW}: ${ema_fast:.6f} / ${ema_slow:.6f}\n\n"
-        f"🤖 <b>AI Reasoning:</b>\n{reasoning}\n\n"
-        f"⚠️ This is only a signal – not financial advice. Do your own research."
-    )
-
-    if send_telegram(message):
-        logger.info(f"✅ {action} recommendation sent for {symbol}")
-    else:
-        logger.warning(f"{action} recommendation generated but Telegram failed for {symbol}")
 
 
-# ====================== MAIN ======================
 def main():
-    logger.info("=== Crypto Buy/Sell Recommendation Bot ===")
-    logger.info(f"Scanning up to {len(COINS)} coins (majors + alts + meme)")
-
-    recommendations = []
-
-    for coin in COINS:
+    logger.info("=== Portfolio Buy/Sell Advisor (manual CoinSwitch) ===")
+    results = []
+    for sym in SCAN_COINS:
         try:
-            scan_coin(coin, recommendations)
-            time.sleep(0.3)
+            row = scan_symbol(sym)
+            if row:
+                results.append(row)
+                logger.info(
+                    f"{sym}: side={row.get('side')} RSI={row.get('rsi', 0):.1f} "
+                    f"portfolio={row.get('in_portfolio')}"
+                )
+            time.sleep(0.25)
         except Exception as e:
-            logger.error(f"Unexpected error on {coin}: {e}")
+            logger.error(f"{sym} error: {e}")
 
-    # Final summary recommendation list
-    buys = [r for r in recommendations if r["side"] == "BUY"]
-    sells = [r for r in recommendations if r["side"] == "SELL"]
+    # Portfolio-focused advice
+    portfolio_sells = [
+        r for r in results if r.get("in_portfolio") and r.get("side") == "SELL"
+    ]
+    portfolio_holds = [
+        r for r in results if r.get("in_portfolio") and r.get("side") != "SELL"
+    ]
+    buy_ideas = [r for r in results if r.get("side") == "BUY" and not r.get("in_portfolio")]
+    # Prefer liquid majors for tiny capital
+    buy_ideas = sorted(
+        buy_ideas,
+        key=lambda x: (
+            0 if x["symbol"] in {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"} else 1,
+            x["rsi"],
+        ),
+    )[:5]
 
-    logger.info(f"=== DONE | BUY: {len(buys)} | SELL: {len(sells)} ===")
+    has_action = bool(portfolio_sells or buy_ideas)
 
-    if not buys and not sells:
-        send_telegram(
-            "📊 <b>Scan Complete</b>\n\n"
-            f"Scanned {len(COINS)} coins.\n"
-            "No clear BUY or SELL recommendations right now."
-        )
+    if not has_action and not ALWAYS_SEND_SUMMARY:
+        logger.info("No actionable advice – silent (avoids spam every 5 min)")
         return
 
-    summary_lines = ["📋 <b>BUY / SELL RECOMMENDATIONS</b>\n"]
+    lines = [
+        "📌 <b>YOUR PORTFOLIO ADVICE</b>",
+        "<i>Capital is small – fees matter. Trade manually on CoinSwitch.</i>",
+        "",
+        "<b>You hold:</b> BTC, DOGE, CHILLGUY, MOG",
+        "",
+    ]
 
-    if buys:
-        summary_lines.append("<b>🟢 CONSIDER BUYING:</b>")
-        for r in buys:
-            summary_lines.append(
-                f"• <b>{r['symbol']}</b> @ ${r['price']:.6f} "
-                f"(RSI {r['rsi']:.0f}) → SL ${r['stop_loss']:.6f} | TP ${r['take_profit']:.6f}"
+    if portfolio_sells:
+        lines.append("<b>🔴 CONSIDER SELLING (from your wallet):</b>")
+        for r in portfolio_sells:
+            lines.append(
+                f"• <b>{r['symbol']}</b> qty {r.get('qty')} @ ${r['price']:.6f} "
+                f"(RSI {r['rsi']:.0f})\n  {r.get('reasoning', '')[:180]}"
             )
-        summary_lines.append("")
+        lines.append("")
+    else:
+        lines.append("<b>🔴 Sell from wallet:</b> No strong sell signal on tracked holdings right now.")
+        lines.append("")
 
-    if sells:
-        summary_lines.append("<b>🔴 CONSIDER SELLING:</b>")
-        for r in sells:
-            summary_lines.append(
+    if buy_ideas:
+        lines.append("<b>🟢 CONSIDER BUYING (rotation ideas):</b>")
+        for r in buy_ideas:
+            lines.append(
                 f"• <b>{r['symbol']}</b> @ ${r['price']:.6f} "
+                f"| SL ${r['stop']:.6f} | TP ${r['target']:.6f} "
                 f"(RSI {r['rsi']:.0f})"
             )
-        summary_lines.append("")
+        lines.append("")
+    else:
+        lines.append("<b>🟢 Buy ideas:</b> No strong buy setups in liquid list right now.")
+        lines.append("")
 
-    summary_lines.append(
-        f"Scanned: {len(COINS)} pairs | "
-        f"Signals: {len(buys)} buy, {len(sells)} sell\n"
-        "⚠️ Not financial advice."
-    )
+    if portfolio_holds:
+        lines.append("<b>⏸ Holdings without sell signal:</b>")
+        for r in portfolio_holds:
+            if r.get("side") is None:
+                lines.append(f"• {r['symbol']}: hold/watch (RSI {r['rsi']:.0f})")
 
-    send_telegram("\n".join(summary_lines))
+    lines.append("")
+    lines.append("⚠️ Not financial advice. Check CoinSwitch fees before every trade.")
+
+    send_telegram("\n".join(lines))
+    logger.info("Advice sent to Telegram")
 
 
 if __name__ == "__main__":
