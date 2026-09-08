@@ -29,7 +29,7 @@ EMA_SLOW = 21
 VOLUME_LOOKBACK = 20
 
 # Set to True to run a simple historical backtest instead of live scan
-BACKTEST_MODE = False
+BACKTEST_MODE = True
 BACKTEST_LIMIT = 200      # number of candles for backtest
 
 # Setup logging
