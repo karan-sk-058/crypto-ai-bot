@@ -11,16 +11,13 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # YOUR CURRENT HOLDINGS (update when you trade)
-# Used so the bot prioritizes advice for coins you already own
 PORTFOLIO = {
     "BTCUSDT": 0.00002404,
     "DOGEUSDT": 10.7122,
-    # Meme coins (may not be on all exchanges – bot will skip if no data)
     "CHILLGUYUSDT": 10.8236,
     "MOGUSDT": 527837.4,
 }
 
-# Liquid coins to consider rotating INTO (small capital = prefer liquid pairs)
 SCAN_COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -28,7 +25,6 @@ SCAN_COINS = [
     "SHIBUSDT", "PEPEUSDT", "WIFUSDT", "BONKUSDT", "FLOKIUSDT",
 ]
 
-# Merge portfolio symbols into scan list
 for sym in PORTFOLIO:
     if sym not in SCAN_COINS:
         SCAN_COINS.insert(0, sym)
@@ -40,10 +36,10 @@ RSI_SELL_MIN = 62
 EMA_FAST = 9
 EMA_SLOW = 21
 VOLUME_LOOKBACK = 20
-CANDLE_INTERVAL = "15m"  # more responsive than 1h for frequent checks
+CANDLE_INTERVAL = "15m"
 
-# Only spam Telegram when there is a real recommendation
-ALWAYS_SEND_SUMMARY = False
+# Always send a short status to Telegram every run
+ALWAYS_SEND_SUMMARY = True
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,12 +80,10 @@ def send_telegram(message: str) -> bool:
 
 
 def get_klines(symbol: str, interval: str = CANDLE_INTERVAL, limit: int = 100):
-    # Public market data (signals). CoinSwitch execution stays manual on the app.
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
-            # fallback Binance.US
             r = requests.get(
                 f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
                 timeout=10,
@@ -211,7 +205,6 @@ def main():
         except Exception as e:
             logger.error(f"{sym} error: {e}")
 
-    # Portfolio-focused advice
     portfolio_sells = [
         r for r in results if r.get("in_portfolio") and r.get("side") == "SELL"
     ]
@@ -219,7 +212,6 @@ def main():
         r for r in results if r.get("in_portfolio") and r.get("side") != "SELL"
     ]
     buy_ideas = [r for r in results if r.get("side") == "BUY" and not r.get("in_portfolio")]
-    # Prefer liquid majors for tiny capital
     buy_ideas = sorted(
         buy_ideas,
         key=lambda x: (
@@ -228,15 +220,9 @@ def main():
         ),
     )[:5]
 
-    has_action = bool(portfolio_sells or buy_ideas)
-
-    if not has_action and not ALWAYS_SEND_SUMMARY:
-        logger.info("No actionable advice – silent (avoids spam every 5 min)")
-        return
-
     lines = [
-        "📌 <b>YOUR PORTFOLIO ADVICE</b>",
-        "<i>Capital is small – fees matter. Trade manually on CoinSwitch.</i>",
+        "📌 <b>YOUR PORTFOLIO STATUS</b>",
+        "<i>Small capital – check fees on CoinSwitch before trading.</i>",
         "",
         "<b>You hold:</b> BTC, DOGE, CHILLGUY, MOG",
         "",
@@ -251,7 +237,7 @@ def main():
             )
         lines.append("")
     else:
-        lines.append("<b>🔴 Sell from wallet:</b> No strong sell signal on tracked holdings right now.")
+        lines.append("<b>🔴 Sell from wallet:</b> No strong sell signal right now.")
         lines.append("")
 
     if buy_ideas:
@@ -264,20 +250,20 @@ def main():
             )
         lines.append("")
     else:
-        lines.append("<b>🟢 Buy ideas:</b> No strong buy setups in liquid list right now.")
+        lines.append("<b>🟢 Buy ideas:</b> No strong buy setups right now.")
         lines.append("")
 
     if portfolio_holds:
-        lines.append("<b>⏸ Holdings without sell signal:</b>")
+        lines.append("<b>⏸ Holdings status:</b>")
         for r in portfolio_holds:
-            if r.get("side") is None:
-                lines.append(f"• {r['symbol']}: hold/watch (RSI {r['rsi']:.0f})")
+            side = r.get("side") or "hold/watch"
+            lines.append(f"• {r['symbol']}: {side} (RSI {r['rsi']:.0f})")
 
     lines.append("")
-    lines.append("⚠️ Not financial advice. Check CoinSwitch fees before every trade.")
+    lines.append("⚠️ Not financial advice. Manual trading only.")
 
     send_telegram("\n".join(lines))
-    logger.info("Advice sent to Telegram")
+    logger.info("Status sent to Telegram")
 
 
 if __name__ == "__main__":
