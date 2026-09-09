@@ -2,7 +2,8 @@ import os
 import time
 import logging
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -20,10 +21,36 @@ TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 CS_API_KEY = (os.environ.get("COINSWITCH_API_KEY") or "").strip()
 CS_SECRET_KEY = (os.environ.get("COINSWITCH_SECRET_KEY") or "").strip()
 
+IST = ZoneInfo("Asia/Kolkata")
 CS_BASE = "https://coinswitch.co"
 CS_EXCHANGE = "c2c1"
 CS_INTERVAL_MIN = 5
 CANDLE_LIMIT_MINUTES = 5 * 80
+
+FULL_NAME = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "SOL": "Solana",
+    "BNB": "BNB",
+    "XRP": "XRP",
+    "ADA": "Cardano",
+    "DOGE": "Dogecoin",
+    "AVAX": "Avalanche",
+    "LINK": "Chainlink",
+    "DOT": "Polkadot",
+    "LTC": "Litecoin",
+    "NEAR": "NEAR Protocol",
+    "SUI": "Sui",
+    "ARB": "Arbitrum",
+    "OP": "Optimism",
+    "SHIB": "Shiba Inu",
+    "PEPE": "Pepe",
+    "WIF": "dogwifhat",
+    "BONK": "Bonk",
+    "FLOKI": "FLOKI",
+    "CHILLGUY": "Chill Guy",
+    "MOG": "Mog Coin",
+}
 
 PORTFOLIO = {
     "BTC": 0.00002404,
@@ -64,8 +91,76 @@ client = genai.Client(api_key=AI_API_KEY)
 CS_ENABLED = bool(CS_API_KEY and CS_SECRET_KEY and ed25519 is not None)
 
 
+def coin_name(base: str) -> str:
+    return FULL_NAME.get(base, base)
+
+
+def format_inr(amount: float) -> str:
+    if amount >= 1000:
+        return f"₹{amount:,.2f}"
+    if amount >= 1:
+        return f"₹{amount:.4f}"
+    if amount >= 0.01:
+        return f"₹{amount:.6f}"
+    return f"₹{amount:.8f}"
+
+
+def get_usdt_inr_rate() -> float:
+    """USDT → INR for displaying CoinSwitch-style rupee prices."""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "tether", "vs_currencies": "inr"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            rate = float(r.json()["tether"]["inr"])
+            if rate > 0:
+                logger.info("USDT/INR rate: %.2f", rate)
+                return rate
+    except Exception as e:
+        logger.warning("CoinGecko INR rate failed: %s", e)
+    # Fallback approximate (will still show rupees)
+    logger.warning("Using fallback USDT/INR = 84")
+    return 84.0
+
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def fmt_ist(dt: datetime) -> str:
+    return dt.strftime("%d %b %Y, %I:%M %p IST")
+
+
+def trade_window_ist(side: str | None, rsi: float) -> tuple[str, str]:
+    """
+    Returns (action_label, exact_window_text in IST).
+    Windows are practical guidance, not guarantees.
+    """
+    n = now_ist()
+    if side == "BUY":
+        start = n
+        end = n + timedelta(minutes=15)
+        label = "BUY NOW"
+        window = f"Buy between {fmt_ist(start)} and {fmt_ist(end)}"
+        if rsi < 30:
+            window += " (strong oversold setup)"
+        return label, window
+    if side == "SELL":
+        start = n
+        end = n + timedelta(minutes=15)
+        label = "SELL NOW"
+        window = f"Sell between {fmt_ist(start)} and {fmt_ist(end)}"
+        if rsi > 70:
+            window += " (strong overbought setup)"
+        return label, window
+    # WAIT
+    next_check = n + timedelta(minutes=5)
+    return "WAIT", f"Do not trade now. Next check around {fmt_ist(next_check)}"
+
+
 def send_telegram(message: str) -> None:
-    """Send Telegram message or raise so the GitHub Action fails visibly."""
     logger.info(
         "Telegram secrets present? TOKEN=%s CHAT_ID=%s",
         "yes" if TELEGRAM_TOKEN else "NO",
@@ -73,31 +168,20 @@ def send_telegram(message: str) -> None:
     )
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise SystemExit(
-            "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in GitHub Actions secrets. "
-            "Add them at: Settings → Secrets and variables → Actions"
+            "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in GitHub Actions secrets."
         )
-
     if len(message) > 4000:
         message = message[:3990] + "\n...(truncated)"
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
     resp = requests.post(url, json=payload, timeout=15)
     if resp.status_code != 200:
-        # Retry plain text (HTML parse errors sometimes block delivery)
-        logger.warning("HTML send failed (%s): %s", resp.status_code, resp.text[:300])
-        payload.pop("parse_mode", None)
-        resp = requests.post(url, json=payload, timeout=15)
-
-    if resp.status_code != 200:
         raise SystemExit(
-            f"Telegram API error {resp.status_code}: {resp.text[:500]}. "
-            "Check TELEGRAM_TOKEN and TELEGRAM_CHAT_ID secrets."
+            f"Telegram API error {resp.status_code}: {resp.text[:500]}"
         )
     logger.info("Telegram message delivered")
 
@@ -112,13 +196,12 @@ def cs_sign_request(method: str, path: str, params: dict | None = None):
     message = method + decoded_path + epoch
     secret = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(CS_SECRET_KEY))
     signature = secret.sign(message.encode("utf-8")).hex()
-    headers = {
+    return {
         "Content-Type": "application/json",
         "X-AUTH-APIKEY": CS_API_KEY,
         "X-AUTH-SIGNATURE": signature,
         "X-AUTH-EPOCH": epoch,
-    }
-    return headers, decoded_path
+    }, decoded_path
 
 
 def cs_get(path: str, params: dict | None = None):
@@ -128,14 +211,13 @@ def cs_get(path: str, params: dict | None = None):
 
 def validate_coinswitch_keys() -> bool:
     if not CS_ENABLED:
-        logger.info("CoinSwitch keys not fully configured")
         return False
     try:
         r = cs_get("/trade/api/v2/validate/keys")
         if r.status_code == 200:
             logger.info("CoinSwitch API keys validated")
             return True
-        logger.warning("CoinSwitch key validation failed: %s %s", r.status_code, r.text[:200])
+        logger.warning("CoinSwitch key validation failed: %s", r.status_code)
         return False
     except Exception as e:
         logger.warning("CoinSwitch validation error: %s", e)
@@ -158,28 +240,25 @@ def get_klines_coinswitch(base: str) -> pd.DataFrame | None:
             },
         )
         if r.status_code != 200:
-            logger.info("CS candles %s: HTTP %s", symbol, r.status_code)
             return None
-        payload = r.json()
-        data = payload.get("data") if isinstance(payload, dict) else None
+        data = r.json().get("data") if isinstance(r.json(), dict) else None
         if not data:
             return None
-        rows = []
-        for c in data:
-            rows.append(
-                {
-                    "timestamp": int(float(c.get("start_time") or c.get("close_time") or 0)),
-                    "open": float(c["o"]),
-                    "high": float(c["h"]),
-                    "low": float(c["l"]),
-                    "close": float(c["c"]),
-                    "volume": float(c.get("volume") or 0),
-                }
-            )
+        rows = [
+            {
+                "timestamp": int(float(c.get("start_time") or c.get("close_time") or 0)),
+                "open": float(c["o"]),
+                "high": float(c["h"]),
+                "low": float(c["l"]),
+                "close": float(c["c"]),
+                "volume": float(c.get("volume") or 0),
+            }
+            for c in data
+        ]
         df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
         return df if len(df) >= 30 else None
     except Exception as e:
-        logger.warning("CS candles error %s: %s", base, e)
+        logger.warning("CS candles %s: %s", base, e)
         return None
 
 
@@ -190,11 +269,6 @@ def get_klines_binance(base: str) -> pd.DataFrame | None:
             f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=100",
             timeout=10,
         )
-        if r.status_code != 200:
-            r = requests.get(
-                f"https://api.binance.us/api/v3/klines?symbol={symbol}&interval=5m&limit=100",
-                timeout=10,
-            )
         if r.status_code != 200:
             return None
         data = r.json()
@@ -255,23 +329,11 @@ def check_signals(df: pd.DataFrame):
     return None
 
 
-def when_to_trade(side, rsi):
-    if side == "BUY":
-        return "NOW (oversold bounce setup)" if rsi < 30 else "NOW / next 5–15 min if price holds"
-    if side == "SELL":
-        return "NOW (overbought pressure)" if rsi > 70 else "NOW / scale out on next push up"
-    if rsi < 35:
-        return "WAIT – watch for buy confirmation"
-    if rsi > 65:
-        return "WAIT – watch for sell confirmation"
-    return "WAIT – no clear intraday edge"
-
-
-def ai_note(base, side, price, rsi):
+def ai_note(name, side, price_inr, rsi):
     prompt = (
-        f"Intraday advisor for CoinSwitch (India). Small capital. "
-        f"{base}/USDT {side} on 5m. Price {price:.6f}, RSI {rsi:.1f}. "
-        f"2 short sentences: what to do on the app and main risk (fees)."
+        f"Intraday advisor for CoinSwitch India. Small capital. "
+        f"{name} {side} on 5m chart. Price about {price_inr:.2f} INR, RSI {rsi:.1f}. "
+        f"2 short sentences for the trader on what to do in the app. Mention fee risk."
     )
     try:
         return client.models.generate_content(
@@ -282,50 +344,54 @@ def ai_note(base, side, price, rsi):
         return "AI note unavailable."
 
 
-def scan_base(base: str, prefer_cs: bool):
+def scan_base(base: str, prefer_cs: bool, usdt_inr: float):
     df, source = get_klines(base, prefer_cs)
     if df is None or len(df) < 30:
         return None
     df = calculate_indicators(df)
     latest = df.iloc[-1]
     signal = check_signals(df)
-    price = float(latest["close"])
+    price_usdt = float(latest["close"])
+    price_inr = price_usdt * usdt_inr
     rsi = float(latest["rsi"])
+    action, window = trade_window_ist(signal, rsi)
+    name = coin_name(base)
     row = {
         "base": base,
-        "pair": f"{base}/USDT",
+        "name": name,
         "side": signal,
-        "price": price,
+        "price_inr": price_inr,
         "rsi": rsi,
         "source": source,
-        "when": when_to_trade(signal, rsi),
+        "action": action,
+        "window": window,
         "in_portfolio": base in PORTFOLIO,
         "qty": PORTFOLIO.get(base),
     }
     if signal:
-        row["stop"] = price * (1 - STOP_LOSS_PCT) if signal == "BUY" else price * (1 + STOP_LOSS_PCT)
-        row["target"] = price * (1 + TAKE_PROFIT_PCT) if signal == "BUY" else price * (1 - TAKE_PROFIT_PCT)
-        row["reasoning"] = ai_note(base, signal, price, rsi)
+        row["stop_inr"] = price_inr * (1 - STOP_LOSS_PCT) if signal == "BUY" else price_inr * (1 + STOP_LOSS_PCT)
+        row["target_inr"] = price_inr * (1 + TAKE_PROFIT_PCT) if signal == "BUY" else price_inr * (1 - TAKE_PROFIT_PCT)
+        row["reasoning"] = ai_note(name, signal, price_inr, rsi)
     return row
 
 
 def main():
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    logger.info("=== CoinSwitch Intraday Advisor (manual trades) ===")
+    n = now_ist()
+    logger.info("=== CoinSwitch Intraday Advisor (INR + IST) ===")
 
     prefer_cs = validate_coinswitch_keys()
-    data_label = "CoinSwitch API" if prefer_cs else "Binance fallback (CS keys missing/invalid)"
-    logger.info("Data source preference: %s", data_label)
+    data_label = "CoinSwitch" if prefer_cs else "Binance (CS unavailable)"
+    usdt_inr = get_usdt_inr_rate()
 
     results = []
     for base in SCAN_BASES:
         try:
-            row = scan_base(base, prefer_cs)
+            row = scan_base(base, prefer_cs, usdt_inr)
             if row:
                 results.append(row)
                 logger.info(
-                    "%s src=%s side=%s RSI=%.1f when=%s",
-                    row["pair"], row["source"], row["side"], row["rsi"], row["when"],
+                    "%s side=%s INR=%.4f RSI=%.1f %s",
+                    row["name"], row["side"], row["price_inr"], row["rsi"], row["action"],
                 )
             time.sleep(0.2)
         except Exception as e:
@@ -340,50 +406,62 @@ def main():
     )[:5]
 
     lines = [
-        f"📌 INTRADAY ADVICE ({now})",
-        f"Data: {data_label}",
-        "Action: open CoinSwitch app and trade manually.",
+        f"INTRADAY PLAN — {fmt_ist(n)}",
+        f"Data: {data_label} | 1 USDT ≈ ₹{usdt_inr:.2f}",
+        "Open CoinSwitch app and follow only if you accept fee risk.",
         "",
-        "You hold: BTC, DOGE, CHILLGUY, MOG",
+        "YOUR WALLET: Bitcoin, Dogecoin, Chill Guy, Mog Coin",
+        "",
+        "========== CLEAR ACTIONS ==========",
         "",
     ]
 
-    action_lines = []
-    for r in sells:
-        action_lines.append(
-            f"🔴 SELL {r['pair']}\n"
-            f"When: {r['when']}\n"
-            f"Qty: {r.get('qty')} @ {r['price']:.6f} | RSI {r['rsi']:.0f}\n"
-            f"{r.get('reasoning', '')[:160]}"
-        )
-    for r in buys:
-        action_lines.append(
-            f"🟢 BUY {r['pair']}\n"
-            f"When: {r['when']}\n"
-            f"Price {r['price']:.6f} | SL {r['stop']:.6f} | TP {r['target']:.6f} | RSI {r['rsi']:.0f}\n"
-            f"{r.get('reasoning', '')[:160]}"
-        )
-
-    if action_lines:
-        lines.append("WHAT / WHEN TO TRADE NOW")
-        lines.extend(action_lines)
+    if not sells and not buys:
+        lines.append("NO TRADE RIGHT NOW")
+        lines.append(f"Time: {fmt_ist(n)}")
+        lines.append(f"Next bot check: about {fmt_ist(n + timedelta(minutes=5))}")
+        lines.append("Reason: no strong buy/sell setup on 5-minute chart.")
         lines.append("")
     else:
-        lines.append("WHAT / WHEN TO TRADE NOW")
-        lines.append("No strong BUY/SELL right now → WAIT (do not force a trade).")
-        lines.append("")
+        if sells:
+            lines.append("SELL (from your wallet)")
+            for r in sells:
+                lines.append(f"Coin: {r['name']} ({r['base']})")
+                lines.append(f"Action: {r['action']}")
+                lines.append(f"Exact time window: {r['window']}")
+                lines.append(f"Your qty: {r.get('qty')}")
+                lines.append(f"Price now: {format_inr(r['price_inr'])}")
+                lines.append(f"Suggested stop: {format_inr(r['stop_inr'])}")
+                lines.append(f"Suggested target: {format_inr(r['target_inr'])}")
+                lines.append(f"RSI: {r['rsi']:.0f}")
+                lines.append(f"Note: {r.get('reasoning', '')[:140]}")
+                lines.append("")
+        if buys:
+            lines.append("BUY (rotation ideas)")
+            for r in buys:
+                lines.append(f"Coin: {r['name']} ({r['base']})")
+                lines.append(f"Action: {r['action']}")
+                lines.append(f"Exact time window: {r['window']}")
+                lines.append(f"Price now: {format_inr(r['price_inr'])}")
+                lines.append(f"Suggested stop: {format_inr(r['stop_inr'])}")
+                lines.append(f"Suggested target: {format_inr(r['target_inr'])}")
+                lines.append(f"RSI: {r['rsi']:.0f}")
+                lines.append(f"Note: {r.get('reasoning', '')[:140]}")
+                lines.append("")
 
     if holds:
-        lines.append("Holdings watch:")
+        lines.append("HOLDINGS WATCH")
         for r in holds:
-            lines.append(f"• {r['pair']}: {r['when']} (RSI {r['rsi']:.0f})")
+            lines.append(
+                f"{r['name']}: {r['action']} | {format_inr(r['price_inr'])} | RSI {r['rsi']:.0f}"
+            )
+            lines.append(f"  {r['window']}")
         lines.append("")
 
-    lines.append("Not financial advice. Fees can erase small-capital profits.")
+    lines.append("Not financial advice. Small capital + fees can mean losses.")
 
-    # Must succeed or job fails
     send_telegram("\n".join(lines))
-    logger.info("Intraday advice sent")
+    logger.info("INR/IST advice sent")
 
 
 if __name__ == "__main__":
