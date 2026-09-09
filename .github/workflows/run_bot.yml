@@ -2,7 +2,6 @@ name: Run Crypto AI Bot
 
 on:
   schedule:
-    # Every 5 minutes (GitHub may delay slightly)
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
@@ -20,14 +19,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas google-genai
+          pip install requests pandas google-genai cryptography
 
       - name: Run the trading bot
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Optional later: CoinSwitch keys (do NOT put real keys in code)
           COINSWITCH_API_KEY: ${{ secrets.COINSWITCH_API_KEY }}
           COINSWITCH_SECRET_KEY: ${{ secrets.COINSWITCH_SECRET_KEY }}
         run: |
