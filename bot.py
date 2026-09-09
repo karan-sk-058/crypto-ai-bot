@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -14,7 +14,6 @@ try:
 except ImportError:
     ed25519 = None
 
-# ====================== CONFIG ======================
 AI_API_KEY = (os.environ.get("AI_API_KEY") or "").strip()
 TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
@@ -28,28 +27,12 @@ CS_INTERVAL_MIN = 5
 CANDLE_LIMIT_MINUTES = 5 * 80
 
 FULL_NAME = {
-    "BTC": "Bitcoin",
-    "ETH": "Ethereum",
-    "SOL": "Solana",
-    "BNB": "BNB",
-    "XRP": "XRP",
-    "ADA": "Cardano",
-    "DOGE": "Dogecoin",
-    "AVAX": "Avalanche",
-    "LINK": "Chainlink",
-    "DOT": "Polkadot",
-    "LTC": "Litecoin",
-    "NEAR": "NEAR Protocol",
-    "SUI": "Sui",
-    "ARB": "Arbitrum",
-    "OP": "Optimism",
-    "SHIB": "Shiba Inu",
-    "PEPE": "Pepe",
-    "WIF": "dogwifhat",
-    "BONK": "Bonk",
-    "FLOKI": "FLOKI",
-    "CHILLGUY": "Chill Guy",
-    "MOG": "Mog Coin",
+    "BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "BNB": "BNB",
+    "XRP": "XRP", "ADA": "Cardano", "DOGE": "Dogecoin", "AVAX": "Avalanche",
+    "LINK": "Chainlink", "DOT": "Polkadot", "LTC": "Litecoin",
+    "NEAR": "NEAR Protocol", "SUI": "Sui", "ARB": "Arbitrum", "OP": "Optimism",
+    "SHIB": "Shiba Inu", "PEPE": "Pepe", "WIF": "dogwifhat", "BONK": "Bonk",
+    "FLOKI": "FLOKI", "CHILLGUY": "Chill Guy", "MOG": "Mog Coin",
 }
 
 PORTFOLIO = {
@@ -60,17 +43,17 @@ PORTFOLIO = {
 }
 
 SCAN_BASES = [
-    "BTC", "ETH", "SOL", "BNB", "XRP",
-    "ADA", "DOGE", "AVAX", "LINK", "DOT",
-    "LTC", "NEAR", "SUI", "ARB", "OP",
-    "SHIB", "PEPE", "WIF", "BONK", "FLOKI",
+    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT",
+    "LTC", "NEAR", "SUI", "ARB", "OP", "SHIB", "PEPE", "WIF", "BONK", "FLOKI",
 ]
 for b in PORTFOLIO:
     if b not in SCAN_BASES:
         SCAN_BASES.insert(0, b)
 
-STOP_LOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.04
+# YOUR PLAN: every coin trade
+STOP_LOSS_PCT = 0.30   # max acceptable loss = -30%
+TAKE_PROFIT_PCT = 0.40  # target profit = +40%
+
 RSI_BUY_MAX = 38
 RSI_SELL_MIN = 62
 EMA_FAST = 9
@@ -106,7 +89,6 @@ def format_inr(amount: float) -> str:
 
 
 def get_usdt_inr_rate() -> float:
-    """USDT → INR for displaying CoinSwitch-style rupee prices."""
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
@@ -116,12 +98,9 @@ def get_usdt_inr_rate() -> float:
         if r.status_code == 200:
             rate = float(r.json()["tether"]["inr"])
             if rate > 0:
-                logger.info("USDT/INR rate: %.2f", rate)
                 return rate
     except Exception as e:
-        logger.warning("CoinGecko INR rate failed: %s", e)
-    # Fallback approximate (will still show rupees)
-    logger.warning("Using fallback USDT/INR = 84")
+        logger.warning("INR rate failed: %s", e)
     return 84.0
 
 
@@ -133,60 +112,31 @@ def fmt_ist(dt: datetime) -> str:
     return dt.strftime("%d %b %Y, %I:%M %p IST")
 
 
-def trade_window_ist(side: str | None, rsi: float) -> tuple[str, str]:
-    """
-    Returns (action_label, exact_window_text in IST).
-    Windows are practical guidance, not guarantees.
-    """
+def trade_window_ist(side, rsi):
     n = now_ist()
     if side == "BUY":
-        start = n
-        end = n + timedelta(minutes=15)
-        label = "BUY NOW"
-        window = f"Buy between {fmt_ist(start)} and {fmt_ist(end)}"
-        if rsi < 30:
-            window += " (strong oversold setup)"
-        return label, window
+        return "BUY NOW", f"Buy between {fmt_ist(n)} and {fmt_ist(n + timedelta(minutes=15))}"
     if side == "SELL":
-        start = n
-        end = n + timedelta(minutes=15)
-        label = "SELL NOW"
-        window = f"Sell between {fmt_ist(start)} and {fmt_ist(end)}"
-        if rsi > 70:
-            window += " (strong overbought setup)"
-        return label, window
-    # WAIT
-    next_check = n + timedelta(minutes=5)
-    return "WAIT", f"Do not trade now. Next check around {fmt_ist(next_check)}"
+        return "SELL NOW", f"Sell between {fmt_ist(n)} and {fmt_ist(n + timedelta(minutes=15))}"
+    return "WAIT", f"Do not trade now. Next check around {fmt_ist(n + timedelta(minutes=5))}"
 
 
 def send_telegram(message: str) -> None:
-    logger.info(
-        "Telegram secrets present? TOKEN=%s CHAT_ID=%s",
-        "yes" if TELEGRAM_TOKEN else "NO",
-        "yes" if TELEGRAM_CHAT_ID else "NO",
-    )
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise SystemExit(
-            "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in GitHub Actions secrets."
-        )
+        raise SystemExit("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     if len(message) > 4000:
         message = message[:3990] + "\n...(truncated)"
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True,
-    }
-    resp = requests.post(url, json=payload, timeout=15)
+    resp = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "disable_web_page_preview": True},
+        timeout=15,
+    )
     if resp.status_code != 200:
-        raise SystemExit(
-            f"Telegram API error {resp.status_code}: {resp.text[:500]}"
-        )
-    logger.info("Telegram message delivered")
+        raise SystemExit(f"Telegram API error {resp.status_code}: {resp.text[:500]}")
+    logger.info("Telegram delivered")
 
 
-def cs_sign_request(method: str, path: str, params: dict | None = None):
+def cs_sign_request(method, path, params=None):
     method = method.upper()
     if params:
         sep = "&" if "?" in path else "?"
@@ -204,7 +154,7 @@ def cs_sign_request(method: str, path: str, params: dict | None = None):
     }, decoded_path
 
 
-def cs_get(path: str, params: dict | None = None):
+def cs_get(path, params=None):
     headers, full_path = cs_sign_request("GET", path, params)
     return requests.get(CS_BASE + full_path, headers=headers, timeout=15)
 
@@ -214,17 +164,12 @@ def validate_coinswitch_keys() -> bool:
         return False
     try:
         r = cs_get("/trade/api/v2/validate/keys")
-        if r.status_code == 200:
-            logger.info("CoinSwitch API keys validated")
-            return True
-        logger.warning("CoinSwitch key validation failed: %s", r.status_code)
-        return False
-    except Exception as e:
-        logger.warning("CoinSwitch validation error: %s", e)
+        return r.status_code == 200
+    except Exception:
         return False
 
 
-def get_klines_coinswitch(base: str) -> pd.DataFrame | None:
+def get_klines_coinswitch(base):
     symbol = f"{base}/USDT"
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - CANDLE_LIMIT_MINUTES * 60 * 1000
@@ -244,29 +189,22 @@ def get_klines_coinswitch(base: str) -> pd.DataFrame | None:
         data = r.json().get("data") if isinstance(r.json(), dict) else None
         if not data:
             return None
-        rows = [
-            {
-                "timestamp": int(float(c.get("start_time") or c.get("close_time") or 0)),
-                "open": float(c["o"]),
-                "high": float(c["h"]),
-                "low": float(c["l"]),
-                "close": float(c["c"]),
-                "volume": float(c.get("volume") or 0),
-            }
-            for c in data
-        ]
+        rows = [{
+            "timestamp": int(float(c.get("start_time") or c.get("close_time") or 0)),
+            "open": float(c["o"]), "high": float(c["h"]),
+            "low": float(c["l"]), "close": float(c["c"]),
+            "volume": float(c.get("volume") or 0),
+        } for c in data]
         df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
         return df if len(df) >= 30 else None
-    except Exception as e:
-        logger.warning("CS candles %s: %s", base, e)
+    except Exception:
         return None
 
 
-def get_klines_binance(base: str) -> pd.DataFrame | None:
-    symbol = f"{base}USDT"
+def get_klines_binance(base):
     try:
         r = requests.get(
-            f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=100",
+            f"https://api.binance.com/api/v3/klines?symbol={base}USDT&interval=5m&limit=100",
             timeout=10,
         )
         if r.status_code != 200:
@@ -283,18 +221,16 @@ def get_klines_binance(base: str) -> pd.DataFrame | None:
         return None
 
 
-def get_klines(base: str, prefer_cs: bool):
+def get_klines(base, prefer_cs):
     if prefer_cs:
         df = get_klines_coinswitch(base)
         if df is not None:
             return df, "CoinSwitch"
     df = get_klines_binance(base)
-    if df is not None:
-        return df, "Binance"
-    return None, "none"
+    return (df, "Binance") if df is not None else (None, "none")
 
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_indicators(df):
     df = df.copy()
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
@@ -309,56 +245,47 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def check_signals(df: pd.DataFrame):
+def check_signals(df):
     if len(df) < max(EMA_SLOW, VOLUME_LOOKBACK) + 5:
         return None
     latest, prev = df.iloc[-1], df.iloc[-2]
     ema_fast, ema_slow, rsi = latest["ema_fast"], latest["ema_slow"], latest["rsi"]
     vol, vol_avg = latest["volume"], latest["vol_avg"]
     volume_ok = vol > (vol_avg * 0.7) if pd.notna(vol_avg) else True
-    bullish_cross = prev["ema_fast"] <= prev["ema_slow"] and ema_fast > ema_slow
-    bearish_cross = prev["ema_fast"] >= prev["ema_slow"] and ema_fast < ema_slow
-    if (ema_fast > ema_slow and rsi < RSI_BUY_MAX and volume_ok) or (
-        bullish_cross and rsi < 48 and volume_ok
-    ):
+    bullish = prev["ema_fast"] <= prev["ema_slow"] and ema_fast > ema_slow
+    bearish = prev["ema_fast"] >= prev["ema_slow"] and ema_fast < ema_slow
+    if (ema_fast > ema_slow and rsi < RSI_BUY_MAX and volume_ok) or (bullish and rsi < 48 and volume_ok):
         return "BUY"
-    if (ema_fast < ema_slow and rsi > RSI_SELL_MIN and volume_ok) or (
-        bearish_cross and rsi > 52 and volume_ok
-    ):
+    if (ema_fast < ema_slow and rsi > RSI_SELL_MIN and volume_ok) or (bearish and rsi > 52 and volume_ok):
         return "SELL"
     return None
 
 
 def ai_note(name, side, price_inr, rsi):
     prompt = (
-        f"Intraday advisor for CoinSwitch India. Small capital. "
-        f"{name} {side} on 5m chart. Price about {price_inr:.2f} INR, RSI {rsi:.1f}. "
-        f"2 short sentences for the trader on what to do in the app. Mention fee risk."
+        f"CoinSwitch India intraday. Plan: max loss -30%, target +40%. "
+        f"{name} {side}, price ~{price_inr:.2f} INR, RSI {rsi:.1f}. "
+        f"2 short sentences. Fees can wipe small capital."
     )
     try:
-        return client.models.generate_content(
-            model="gemini-3.7-flash", contents=prompt
-        ).text.strip()
-    except Exception as e:
-        logger.error("AI failed: %s", e)
+        return client.models.generate_content(model="gemini-3.7-flash", contents=prompt).text.strip()
+    except Exception:
         return "AI note unavailable."
 
 
-def scan_base(base: str, prefer_cs: bool, usdt_inr: float):
+def scan_base(base, prefer_cs, usdt_inr):
     df, source = get_klines(base, prefer_cs)
     if df is None or len(df) < 30:
         return None
     df = calculate_indicators(df)
     latest = df.iloc[-1]
     signal = check_signals(df)
-    price_usdt = float(latest["close"])
-    price_inr = price_usdt * usdt_inr
+    price_inr = float(latest["close"]) * usdt_inr
     rsi = float(latest["rsi"])
     action, window = trade_window_ist(signal, rsi)
-    name = coin_name(base)
     row = {
         "base": base,
-        "name": name,
+        "name": coin_name(base),
         "side": signal,
         "price_inr": price_inr,
         "rsi": rsi,
@@ -369,16 +296,18 @@ def scan_base(base: str, prefer_cs: bool, usdt_inr: float):
         "qty": PORTFOLIO.get(base),
     }
     if signal:
-        row["stop_inr"] = price_inr * (1 - STOP_LOSS_PCT) if signal == "BUY" else price_inr * (1 + STOP_LOSS_PCT)
-        row["target_inr"] = price_inr * (1 + TAKE_PROFIT_PCT) if signal == "BUY" else price_inr * (1 - TAKE_PROFIT_PCT)
-        row["reasoning"] = ai_note(name, signal, price_inr, rsi)
+        if signal == "BUY":
+            row["stop_inr"] = price_inr * (1 - STOP_LOSS_PCT)
+            row["target_inr"] = price_inr * (1 + TAKE_PROFIT_PCT)
+        else:
+            row["stop_inr"] = price_inr * (1 + STOP_LOSS_PCT)
+            row["target_inr"] = price_inr * (1 - TAKE_PROFIT_PCT)
+        row["reasoning"] = ai_note(row["name"], signal, price_inr, rsi)
     return row
 
 
 def main():
     n = now_ist()
-    logger.info("=== CoinSwitch Intraday Advisor (INR + IST) ===")
-
     prefer_cs = validate_coinswitch_keys()
     data_label = "CoinSwitch" if prefer_cs else "Binance (CS unavailable)"
     usdt_inr = get_usdt_inr_rate()
@@ -389,13 +318,9 @@ def main():
             row = scan_base(base, prefer_cs, usdt_inr)
             if row:
                 results.append(row)
-                logger.info(
-                    "%s side=%s INR=%.4f RSI=%.1f %s",
-                    row["name"], row["side"], row["price_inr"], row["rsi"], row["action"],
-                )
             time.sleep(0.2)
         except Exception as e:
-            logger.error("%s error: %s", base, e)
+            logger.error("%s: %s", base, e)
 
     sells = [r for r in results if r.get("in_portfolio") and r.get("side") == "SELL"]
     holds = [r for r in results if r.get("in_portfolio") and r.get("side") != "SELL"]
@@ -407,61 +332,65 @@ def main():
 
     lines = [
         f"INTRADAY PLAN — {fmt_ist(n)}",
+        f"YOUR RULE: Max loss -30% | Target profit +40% (every coin)",
         f"Data: {data_label} | 1 USDT ≈ ₹{usdt_inr:.2f}",
-        "Open CoinSwitch app and follow only if you accept fee risk.",
+        "Trade manually on CoinSwitch app.",
         "",
-        "YOUR WALLET: Bitcoin, Dogecoin, Chill Guy, Mog Coin",
+        "WALLET: Bitcoin, Dogecoin, Chill Guy, Mog Coin",
         "",
         "========== CLEAR ACTIONS ==========",
         "",
     ]
 
     if not sells and not buys:
-        lines.append("NO TRADE RIGHT NOW")
-        lines.append(f"Time: {fmt_ist(n)}")
-        lines.append(f"Next bot check: about {fmt_ist(n + timedelta(minutes=5))}")
-        lines.append("Reason: no strong buy/sell setup on 5-minute chart.")
-        lines.append("")
+        lines += [
+            "NO TRADE RIGHT NOW",
+            f"Time: {fmt_ist(n)}",
+            f"Next check: ~{fmt_ist(n + timedelta(minutes=5))}",
+            "Reason: no strong 5-minute setup.",
+            "",
+        ]
     else:
         if sells:
-            lines.append("SELL (from your wallet)")
+            lines.append("SELL (from wallet)")
             for r in sells:
-                lines.append(f"Coin: {r['name']} ({r['base']})")
-                lines.append(f"Action: {r['action']}")
-                lines.append(f"Exact time window: {r['window']}")
-                lines.append(f"Your qty: {r.get('qty')}")
-                lines.append(f"Price now: {format_inr(r['price_inr'])}")
-                lines.append(f"Suggested stop: {format_inr(r['stop_inr'])}")
-                lines.append(f"Suggested target: {format_inr(r['target_inr'])}")
-                lines.append(f"RSI: {r['rsi']:.0f}")
-                lines.append(f"Note: {r.get('reasoning', '')[:140]}")
-                lines.append("")
+                lines += [
+                    f"Coin: {r['name']} ({r['base']})",
+                    f"Action: {r['action']}",
+                    f"Time window: {r['window']}",
+                    f"Qty: {r.get('qty')}",
+                    f"Price now: {format_inr(r['price_inr'])}",
+                    f"Stop loss (-30%): {format_inr(r['stop_inr'])}",
+                    f"Take profit (+40% path): {format_inr(r['target_inr'])}",
+                    f"RSI: {r['rsi']:.0f}",
+                    f"Note: {r.get('reasoning', '')[:140]}",
+                    "",
+                ]
         if buys:
-            lines.append("BUY (rotation ideas)")
+            lines.append("BUY")
             for r in buys:
-                lines.append(f"Coin: {r['name']} ({r['base']})")
-                lines.append(f"Action: {r['action']}")
-                lines.append(f"Exact time window: {r['window']}")
-                lines.append(f"Price now: {format_inr(r['price_inr'])}")
-                lines.append(f"Suggested stop: {format_inr(r['stop_inr'])}")
-                lines.append(f"Suggested target: {format_inr(r['target_inr'])}")
-                lines.append(f"RSI: {r['rsi']:.0f}")
-                lines.append(f"Note: {r.get('reasoning', '')[:140]}")
-                lines.append("")
+                lines += [
+                    f"Coin: {r['name']} ({r['base']})",
+                    f"Action: {r['action']}",
+                    f"Time window: {r['window']}",
+                    f"Price now: {format_inr(r['price_inr'])}",
+                    f"Stop loss (-30%): {format_inr(r['stop_inr'])}",
+                    f"Take profit (+40%): {format_inr(r['target_inr'])}",
+                    f"RSI: {r['rsi']:.0f}",
+                    f"Note: {r.get('reasoning', '')[:140]}",
+                    "",
+                ]
 
     if holds:
         lines.append("HOLDINGS WATCH")
         for r in holds:
-            lines.append(
-                f"{r['name']}: {r['action']} | {format_inr(r['price_inr'])} | RSI {r['rsi']:.0f}"
-            )
+            lines.append(f"{r['name']}: {r['action']} | {format_inr(r['price_inr'])} | RSI {r['rsi']:.0f}")
             lines.append(f"  {r['window']}")
         lines.append("")
 
-    lines.append("Not financial advice. Small capital + fees can mean losses.")
+    lines.append("Not financial advice. -30% risk is very high for intraday.")
 
     send_telegram("\n".join(lines))
-    logger.info("INR/IST advice sent")
 
 
 if __name__ == "__main__":
